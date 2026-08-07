@@ -1,0 +1,12 @@
+# actionlint configuration.
+#
+# `github.job_workflow_sha` is a documented property of the `github` context —
+# "for jobs using a reusable workflow, the commit SHA for the reusable workflow
+# file". Every workflow here uses it to pin the skills/ checkout to the exact
+# commit of the workflow the caller pinned. actionlint's built-in type table for
+# the github context has not caught up, so it reports the property as undefined.
+# Suppress that one message rather than dropping the pinning.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'property "job_workflow_sha" is not defined'

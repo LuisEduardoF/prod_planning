@@ -1,0 +1,39 @@
+# EXAMPLE WRAPPER — copy this into YOUR repo at .github/workflows/checklists.yml
+#
+# Scaffolds the context/ folder on demand, and regenerates the checklists
+# whenever the context documents change.
+
+name: Context and checklists
+
+on:
+  push:
+    branches: [main]
+    paths: ["context/**"]
+  workflow_dispatch:
+    inputs:
+      scaffold:
+        description: "Also scaffold/repair the context/ folder first"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scaffold:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scaffold }}
+    uses: artefactory-br/prod_planning/.github/workflows/context-scaffold.yml@v1
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  checklists:
+    # Runs on the push path, and after scaffolding on the dispatch path.
+    needs: [scaffold]
+    if: ${{ always() && needs.scaffold.result != 'failure' }}
+    uses: artefactory-br/prod_planning/.github/workflows/checklist-generate.yml@v1
+    with:
+      context_path: context
+      output_path: checklists
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

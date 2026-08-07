@@ -1,0 +1,242 @@
+# ---------------------------------------------------------------------------
+# Checklist Generate — reusable workflow (`workflow_call`)
+#
+# Reads the CALLING repository's `context/` folder and generates two checklists
+# — `checklist-code.md` and `checklist-data.md` — then commits them on a branch
+# and opens a pull request.
+#
+# Idempotency: FULL REGENERATE. Both files are rewritten from scratch on every
+# run, because the context documents are the source of truth — hand-edits to a
+# checklist are discarded by design (see skills/checklist-generate/SKILL.md).
+# If the regenerated files are byte-identical to what is already committed, no
+# branch and no pull request are created and the run succeeds quietly.
+# A missing `context_path` FAILS LOUDLY rather than generating an empty
+# checklist; empty subfolders only warn, and are reported as `⚠ gap` items.
+#
+# Inputs:
+#   context_path    (string, optional, default "context")
+#                   Folder holding business/, product/, data/input/, data/output/.
+#   output_path     (string, optional, default "checklists")
+#                   Directory to write the two checklist files into.
+#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_ref   (string, optional) — defaults to this file's own commit.
+#
+# Secrets:
+#   anthropic_api_key (optional) — Anthropic API key for the Claude Code action.
+#   github_app_id     (optional) — GitHub App id; with github_app_pem, mints a
+#                                  token so the pull request this opens can
+#                                  trigger the caller's other workflows.
+#   github_app_pem    (optional) — GitHub App private key (PEM).
+#
+# Example caller (.github/workflows/checklists.yml in YOUR repo):
+#
+#   name: Regenerate checklists
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ["context/**"]
+#     workflow_dispatch:
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     checklists:
+#       uses: artefactory-br/prod_planning/.github/workflows/checklist-generate.yml@v1
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+# ---------------------------------------------------------------------------
+
+name: Checklist Generate
+
+on:
+  workflow_call:
+    inputs:
+      context_path:
+        description: "Folder holding business/, product/, data/input/, data/output/"
+        type: string
+        required: false
+        default: "context"
+      output_path:
+        description: "Directory to write checklist-code.md and checklist-data.md into"
+        type: string
+        required: false
+        default: "checklists"
+      workflows_repo:
+        description: "Repo hosting the skills/ folder"
+        type: string
+        required: false
+        default: artefactory-br/prod_planning
+      workflows_ref:
+        description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
+        type: string
+        required: false
+    secrets:
+      anthropic_api_key:
+        required: false
+      github_app_id:
+        required: false
+      github_app_pem:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not an allowed context in a step-level `if:`, but it is in a
+      # job-level `env:`. Hoist the check here so the step below can test it.
+      HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+      CONTEXT_PATH: ${{ inputs.context_path }}
+      OUTPUT_PATH: ${{ inputs.output_path }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      BRANCH: checklist-generate/run-${{ github.run_id }}
+
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: ${{ env.HAS_APP_CREDS == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_pem }}
+
+      - name: Resolve the token to use
+        id: auth
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+      # The CALLING repository. No `repository:` override on purpose — under
+      # workflow_call this resolves to the caller, whose context/ we read.
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.auth.outputs.token }}
+
+      # This hub repo, for `skills/` only.
+      - name: Checkout the skills library
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.workflows_repo }}
+          ref: ${{ inputs.workflows_ref || github.job_workflow_sha }}
+          path: .prod-planning
+          # Lets an App with read access here serve a PRIVATE hub repo.
+          token: ${{ steps.auth.outputs.token }}
+          # We never push from this checkout, and the agent can read the
+          # workspace — don't leave a usable token in .prod-planning/.git/config.
+          persist-credentials: false
+
+      - name: Keep the skills checkout out of the caller's index
+        run: |
+          # The pull request below is built with `git add -A`; without this the
+          # whole skills library would be staged into it.
+          echo ".prod-planning/" >>"$GITHUB_WORKSPACE/.git/info/exclude"
+
+      - name: Check the context folder
+        run: |
+          # Fail loudly rather than generating a checklist from nothing.
+          if [[ ! -d "$CONTEXT_PATH" ]]; then
+            echo "::error::context folder '$CONTEXT_PATH' does not exist — run context-scaffold first, or pass the right context_path"
+            exit 1
+          fi
+
+          # Warn, don't stop: an empty subfolder is a gap the checklist records.
+          for sub in business product data/input data/output; do
+            if [[ ! -d "$CONTEXT_PATH/$sub" ]]; then
+              echo "::warning::'$CONTEXT_PATH/$sub' is missing — it will be reported as a gap"
+            elif [[ -z "$(find "$CONTEXT_PATH/$sub" -type f ! -name '.gitkeep' -print -quit)" ]]; then
+              echo "::warning::'$CONTEXT_PATH/$sub' has no documents — it will be reported as a gap"
+            fi
+          done
+
+          mkdir -p "$OUTPUT_PATH"
+
+      - name: Run checklist-generate skill
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ steps.auth.outputs.token }}
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(mkdir:*),Bash(ls:*),Bash(find:*)"
+          prompt: |
+            Read and follow the instructions in
+            `.prod-planning/skills/checklist-generate/SKILL.md` (and its
+            templates in the sibling `assets/` folder) to generate the code and
+            data checklists.
+
+            `.prod-planning/` is the skill library only — read from it, never
+            write to it and never commit it. The repository you are documenting
+            is the one checked out at the workspace root.
+
+            Inputs — both are given, do not ask for them and do not substitute defaults:
+            - Context folder: `${{ inputs.context_path }}`
+            - Output path:    `${{ inputs.output_path }}`
+
+            Follow the skill's steps exactly: inventory the context folder, read
+            every document in full (all pages of every PDF), and write
+            `${{ inputs.output_path }}/checklist-code.md` and
+            `${{ inputs.output_path }}/checklist-data.md`.
+
+            Regenerate both files from scratch — the context documents are the
+            source of truth, not any previous checklist. Record missing or empty
+            context as `⚠ gap` items rather than omitting them, and never invent
+            requirements or schema fields that are not in the documents.
+
+            Do not create a branch, commit, or pull request — later steps in
+            this workflow handle version control. Finish with the skill's
+            one-line summary per checklist: item count and gap count.
+
+      - name: Confirm both checklists were produced
+        run: |
+          for f in checklist-code.md checklist-data.md; do
+            if [[ ! -s "$OUTPUT_PATH/$f" ]]; then
+              echo "::error::expected '$OUTPUT_PATH/$f' was not produced"
+              exit 1
+            fi
+          done
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "Checklists are unchanged since the last run — nothing to commit."
+            exit 0
+          fi
+
+          echo "Changes detected:"
+          git status --short
+
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "Generate code and data checklists from ${CONTEXT_PATH}"
+          git push -u origin "$BRANCH"
+
+          {
+            echo "Regenerates the code and data checklists from \`${CONTEXT_PATH}\` by running the"
+            echo "\`checklist-generate\` skill, writing into \`${OUTPUT_PATH}\`."
+            echo
+            echo "Files in this branch:"
+            echo
+            echo '```'
+            git diff --name-status "origin/${BASE_BRANCH}...${BRANCH}"
+            echo '```'
+            echo
+            echo "Both checklists are generated from scratch — fix the source context documents"
+            echo "and re-run rather than hand-editing an item closed."
+          } >"${{ runner.temp }}/pr-body.md"
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH" \
+            --title "Generate code and data checklists" \
+            --body-file "${{ runner.temp }}/pr-body.md"

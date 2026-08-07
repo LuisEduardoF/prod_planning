@@ -1,0 +1,33 @@
+# EXAMPLE WRAPPER — copy this into YOUR repo at .github/workflows/rollback-execute.yml
+#
+# Applies an agreed rollback plan when someone with write access comments
+# `/execute-rollback` on the issue carrying it, and opens a pull request.
+#
+# The reusable workflow re-checks the trigger phrase, that the comment is on an
+# issue rather than a pull request, and the commenter's association — you cannot
+# turn those off from here. Wrapped with any event other than `issue_comment`
+# the job is skipped rather than run unguarded.
+
+name: Execute rollback
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  execute:
+    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
+    with:
+      issue_number: ${{ github.event.issue.number }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      # An App token is worth setting here: pull requests opened with the
+      # default GITHUB_TOKEN do not trigger your other workflows (no CI on the
+      # rollback PR).
+      # github_app_id:  ${{ secrets.APP_ID }}
+      # github_app_pem: ${{ secrets.APP_PRIVATE_KEY }}

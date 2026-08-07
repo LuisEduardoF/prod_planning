@@ -1,0 +1,266 @@
+# ---------------------------------------------------------------------------
+# Rollback Plan Generate — reusable workflow (`workflow_call`)
+#
+# First half of the rollback flow: reads a GitHub issue plus the CALLING
+# repository's `context/` folder and checklists, generates a rollback plan, and
+# posts it to the issue as a comment.
+#
+# Idempotency: re-running for the same issue REGENERATES the plan from scratch
+# and UPDATES its own previous comment in place (matched on the marker
+# `<!-- rollback-plan-generate: issue-<N> -->`) rather than stacking
+# near-identical plans on the thread. Set `new_comment: true` to always add a
+# new comment instead. The plan file is written into the workspace but is NOT
+# committed — this workflow only comments.
+#
+# The marker is a contract with rollback-plan-execute.yml, which greps for that
+# exact string to confirm a plan exists. Change one, change the other.
+#
+# Inputs:
+#   issue_number    (number, REQUIRED)
+#                   Issue to generate the rollback plan from.
+#   context_path    (string, optional, default "context")
+#   output_path     (string, optional)
+#                   File to write the plan into. Defaults to
+#                   `checklists/rollback-plan-issue-<issue_number>.md`.
+#   new_comment     (boolean, optional, default false)
+#                   Always post a new comment instead of updating the previous.
+#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_ref   (string, optional) — defaults to this file's own commit.
+#
+# Secrets:
+#   anthropic_api_key (optional) — Anthropic API key for the Claude Code action.
+#   github_app_id     (optional) — GitHub App id; with github_app_pem, the plan
+#                                  comment is posted as the App rather than
+#                                  github-actions[bot].
+#   github_app_pem    (optional) — GitHub App private key (PEM).
+#
+# Example caller (.github/workflows/rollback-plan.yml in YOUR repo):
+#
+#   name: Rollback plan
+#   on:
+#     issues:
+#       types: [opened]
+#   permissions:
+#     contents: read
+#     issues: write
+#   jobs:
+#     plan:
+#       uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
+#       with:
+#         issue_number: ${{ github.event.issue.number }}
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+# ---------------------------------------------------------------------------
+
+name: Rollback Plan Generate
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: "Issue number to generate the rollback plan from"
+        type: number
+        required: true
+      context_path:
+        description: "Folder holding business/, product/, data/input/, data/output/"
+        type: string
+        required: false
+        default: "context"
+      output_path:
+        description: "File to write the plan into (default checklists/rollback-plan-issue-<N>.md)"
+        type: string
+        required: false
+        default: ""
+      new_comment:
+        description: "Always add a new comment instead of updating the previous generated one"
+        type: boolean
+        required: false
+        default: false
+      workflows_repo:
+        description: "Repo hosting the skills/ folder"
+        type: string
+        required: false
+        default: artefactory-br/prod_planning
+      workflows_ref:
+        description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
+        type: string
+        required: false
+    secrets:
+      anthropic_api_key:
+        required: false
+      github_app_id:
+        required: false
+      github_app_pem:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not an allowed context in a step-level `if:`, but it is in a
+      # job-level `env:`. Hoist the check here so the step below can test it.
+      HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      CONTEXT_PATH: ${{ inputs.context_path }}
+      NEW_COMMENT: ${{ inputs.new_comment }}
+
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: ${{ env.HAS_APP_CREDS == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_pem }}
+
+      - name: Resolve the token to use
+        id: auth
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+      # The CALLING repository. No `repository:` override on purpose — under
+      # workflow_call this resolves to the caller, whose context/ and checklists
+      # the plan is grounded in.
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.auth.outputs.token }}
+
+      # This hub repo, for `skills/` only.
+      - name: Checkout the skills library
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.workflows_repo }}
+          ref: ${{ inputs.workflows_ref || github.job_workflow_sha }}
+          path: .prod-planning
+          # Lets an App with read access here serve a PRIVATE hub repo.
+          token: ${{ steps.auth.outputs.token }}
+          # We never push from this checkout, and the agent can read the
+          # workspace — don't leave a usable token in .prod-planning/.git/config.
+          persist-credentials: false
+
+      - name: Keep the skills checkout out of the caller's index
+        run: |
+          echo ".prod-planning/" >>"$GITHUB_WORKSPACE/.git/info/exclude"
+
+      - name: Resolve the output path and check inputs
+        id: paths
+        run: |
+          output="${{ inputs.output_path }}"
+          if [[ -z "$output" ]]; then
+            output="checklists/rollback-plan-issue-${ISSUE_NUMBER}.md"
+          fi
+          echo "output=$output" >>"$GITHUB_OUTPUT"
+
+          # Fail loudly rather than grounding the plan in nothing.
+          if [[ ! -d "$CONTEXT_PATH" ]]; then
+            echo "::error::context folder '$CONTEXT_PATH' does not exist — run context-scaffold first, or pass the right context_path"
+            exit 1
+          fi
+
+          # Warn, don't stop: thin context just means more steps come back ⚙ inferred.
+          for sub in business product data/input data/output; do
+            if [[ ! -d "$CONTEXT_PATH/$sub" ]]; then
+              echo "::warning::'$CONTEXT_PATH/$sub' is missing — related steps will be marked inferred"
+            elif [[ -z "$(find "$CONTEXT_PATH/$sub" -type f ! -name '.gitkeep' -print -quit)" ]]; then
+              echo "::warning::'$CONTEXT_PATH/$sub' has no documents — related steps will be marked inferred"
+            fi
+          done
+
+          for f in checklists/checklist-code.md checklists/checklist-data.md; do
+            [[ -f "$f" ]] || echo "::warning::'$f' not found — rollback steps lose their strongest source"
+          done
+
+          mkdir -p "$(dirname "$output")"
+
+      - name: Run rollback-plan-generate skill
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ steps.auth.outputs.token }}
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,Bash(mkdir:*),Bash(ls:*),Bash(find:*),Bash(git remote get-url:*),Bash(gh issue view:*)"
+          prompt: |
+            Read and follow the instructions in
+            `.prod-planning/skills/rollback-plan-generate/SKILL.md` (and its
+            template in the sibling `assets/` folder) to generate the rollback
+            plan.
+
+            `.prod-planning/` is the skill library only — read from it, never
+            write to it and never commit it. The repository you are planning
+            for is the one checked out at the workspace root.
+
+            Inputs — all are given, do not ask for them and do not substitute defaults:
+            - Context folder: `${{ inputs.context_path }}`
+            - GitHub issue:   #${{ inputs.issue_number }} in ${{ github.repository }}
+            - Output path:    `${{ steps.paths.outputs.output }}`
+
+            Follow the skill's steps exactly: fetch the issue, read every
+            document under the context folder in full (all pages of every PDF),
+            read `checklists/checklist-code.md` and
+            `checklists/checklist-data.md` if they exist, and write
+            `${{ steps.paths.outputs.output }}`.
+
+            Regenerate the file from scratch — the issue thread and context
+            documents are the source of truth, not any previous plan. Label
+            every item by provenance and mark anything not backed by a document
+            or checklist entry as `⚙ inferred`.
+
+            Reading the issue is the only GitHub interaction allowed: never
+            comment on, label, or close it. A later step in this workflow posts
+            the plan to the issue. Finish with the skill's report: the file path
+            plus the traced-vs-inferred step counts.
+
+      - name: Post the plan to the issue
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+          OUTPUT_FILE: ${{ steps.paths.outputs.output }}
+        run: |
+          if [[ ! -s "$OUTPUT_FILE" ]]; then
+            echo "::error::expected '$OUTPUT_FILE' was not produced"
+            exit 1
+          fi
+
+          # Lets a re-run find and update its own previous comment instead of
+          # stacking near-identical plans onto the thread. rollback-plan-execute
+          # greps for this exact marker.
+          marker="<!-- rollback-plan-generate: issue-${ISSUE_NUMBER} -->"
+
+          body="${{ runner.temp }}/comment.md"
+          {
+            echo "$marker"
+            cat "$OUTPUT_FILE"
+            echo
+            echo "---"
+            echo "Generated by the \`rollback-plan-generate\` workflow from \`${CONTEXT_PATH}\`. Steps tagged \`⚙ inferred\` have no documented procedure behind them and need a human decision before use."
+          } >"$body"
+
+          existing=""
+          if [[ "$NEW_COMMENT" != "true" ]]; then
+            # `gh api` writes its error body to stdout, so a failed lookup would
+            # come back looking like a comment id. Require a numeric id.
+            existing=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+              --paginate --jq ".[] | select(.body | contains(\"$marker\")) | .id" 2>/dev/null | tail -1) || existing=""
+            [[ "$existing" =~ ^[0-9]+$ ]] || existing=""
+          fi
+
+          if [[ -n "$existing" ]]; then
+            url=$(gh api --method PATCH \
+              "repos/${{ github.repository }}/issues/comments/${existing}" \
+              -F "body=@${body}" --jq .html_url)
+            echo "Updated the existing rollback-plan comment: $url"
+          else
+            url=$(gh issue comment "$ISSUE_NUMBER" --body-file "$body")
+            echo "Posted rollback plan to issue #${ISSUE_NUMBER}: $url"
+          fi
+
+          echo "The plan file at '$OUTPUT_FILE' is left uncommitted — this workflow only comments."

@@ -1,0 +1,274 @@
+# ---------------------------------------------------------------------------
+# Rollback Plan Execute — reusable workflow (`workflow_call`)
+#
+# Second half of the rollback flow: once a rollback plan has been posted to an
+# issue and someone agrees to it, commenting `/execute-rollback` on that issue
+# applies the plan's code steps to the CALLING repository and opens a pull
+# request answering the issue.
+#
+# TRIGGER CONTRACT — read this before writing a wrapper.
+# The three safety gates below deliberately read `github.event.*` directly
+# rather than workflow inputs, so a caller cannot weaken them by writing a
+# careless wrapper. `workflow_call` inherits the caller's event context, so
+# they resolve correctly when — and only when — your wrapper is triggered by
+# `issue_comment`. Wrapped with any other event the gates evaluate empty and
+# the job is SKIPPED, not run unguarded. That is intentional: this workflow
+# pushes code, so it fails closed.
+#
+# Inputs:
+#   issue_number    (number, REQUIRED)
+#                   Issue carrying the agreed rollback plan.
+#   context_path    (string, optional, default "context")
+#                   Context folder in the caller's repo.
+#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_ref   (string, optional) — defaults to this file's own commit.
+#
+# Secrets:
+#   anthropic_api_key (optional) — Anthropic API key for the Claude Code action.
+#   github_app_id     (optional) — GitHub App id; with github_app_pem, mints a
+#                                  token so the pull request this opens can
+#                                  trigger the caller's other workflows.
+#   github_app_pem    (optional) — GitHub App private key (PEM).
+#
+# Example caller (.github/workflows/rollback-execute.yml in YOUR repo):
+#
+#   name: Execute rollback
+#   on:
+#     issue_comment:
+#       types: [created]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     issues: write
+#   jobs:
+#     execute:
+#       uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
+#       with:
+#         issue_number: ${{ github.event.issue.number }}
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+# ---------------------------------------------------------------------------
+
+name: Rollback Plan Execute
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: "Issue number carrying the agreed rollback plan"
+        type: number
+        required: true
+      context_path:
+        description: "Context folder in the calling repo"
+        type: string
+        required: false
+        default: "context"
+      workflows_repo:
+        description: "Repo hosting the skills/ folder"
+        type: string
+        required: false
+        default: artefactory-br/prod_planning
+      workflows_ref:
+        description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
+        type: string
+        required: false
+    secrets:
+      anthropic_api_key:
+        required: false
+      github_app_id:
+        required: false
+      github_app_pem:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  execute:
+    # Three gates, all required:
+    #  - a real issue, not a pull request (issue_comment fires for both)
+    #  - the explicit trigger phrase
+    #  - a commenter who can already write to this repo. Without this last
+    #    check any passer-by could make the agent push code.
+    # Read from github.event.* rather than inputs on purpose — see the TRIGGER
+    # CONTRACT note at the top of this file.
+    if: >
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/execute-rollback') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not an allowed context in a step-level `if:`, but it is in a
+      # job-level `env:`. Hoist the check here so the step below can test it.
+      HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      BRANCH: rollback-execute/issue-${{ inputs.issue_number }}-${{ github.run_id }}
+
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: ${{ env.HAS_APP_CREDS == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_pem }}
+
+      - name: Resolve the token to use
+        id: auth
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+      # The CALLING repository. No `repository:` override on purpose — under
+      # workflow_call this resolves to the caller, whose source we are changing.
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ steps.auth.outputs.token }}
+
+      # This hub repo, for `skills/` only.
+      - name: Checkout the skills library
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.workflows_repo }}
+          ref: ${{ inputs.workflows_ref || github.job_workflow_sha }}
+          path: .prod-planning
+          # Lets an App with read access here serve a PRIVATE hub repo.
+          token: ${{ steps.auth.outputs.token }}
+          # We never push from this checkout, and the agent can read the
+          # workspace — don't leave a usable token in .prod-planning/.git/config.
+          persist-credentials: false
+
+      - name: Keep the skills checkout out of the caller's index
+        run: |
+          # The pull request below is built with `git add -A`; without this the
+          # whole skills library would be staged into it.
+          echo ".prod-planning/" >>"$GITHUB_WORKSPACE/.git/info/exclude"
+
+      - name: Acknowledge the request
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "Executing the rollback plan — [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+
+      - name: Confirm a rollback plan exists
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          marker="<!-- rollback-plan-generate: issue-${ISSUE_NUMBER} -->"
+          # `gh api` writes its error body to stdout, so a failed lookup would
+          # come back looking like a comment id. Require a numeric id.
+          found=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            --paginate --jq ".[] | select(.body | contains(\"$marker\")) | .id" 2>/dev/null | tail -1) || found=""
+          [[ "$found" =~ ^[0-9]+$ ]] || found=""
+          if [[ -z "$found" && ! -f "checklists/rollback-plan-issue-${ISSUE_NUMBER}.md" ]]; then
+            gh issue comment "$ISSUE_NUMBER" --body \
+              "No rollback plan found on this issue. Generate one first, then comment \`/execute-rollback\` again."
+            echo "::error::no rollback plan for issue #${ISSUE_NUMBER}"
+            exit 1
+          fi
+
+      - name: Apply the rollback plan
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ steps.auth.outputs.token }}
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,Bash(mkdir:*),Bash(ls:*),Bash(find:*),Bash(gh issue view:*),Bash(gh api:*),Bash(git diff:*),Bash(git status:*),Bash(python3:*),Bash(pytest:*)"
+          prompt: |
+            Read and follow the instructions in
+            `.prod-planning/skills/rollback-plan-execute/SKILL.md` (and its
+            template in the sibling `assets/` folder) to apply the agreed
+            rollback plan.
+
+            `.prod-planning/` is the skill library only — read from it, never
+            write to it and never commit it. The repository you are changing is
+            the one checked out at the workspace root.
+
+            Inputs — all are given, do not ask for them and do not substitute defaults:
+            - GitHub issue:   #${{ inputs.issue_number }} in ${{ github.repository }}
+            - Context folder: `${{ inputs.context_path }}`
+            - Summary output: `${{ runner.temp }}/rollback-summary.md`
+
+            Find the plan on the issue (the comment carrying the marker
+            `<!-- rollback-plan-generate: issue-${{ inputs.issue_number }} -->`),
+            falling back to `checklists/rollback-plan-issue-${{ inputs.issue_number }}.md`.
+            If neither exists, stop and say so — do not write a plan and execute
+            it in the same run.
+
+            Classify every plan step as code / operational / already satisfied,
+            apply only the code steps to the repository's source, and write the
+            execution summary to `${{ runner.temp }}/rollback-summary.md`.
+
+            Do not edit `checklists/checklist-code.md` or
+            `checklists/checklist-data.md` — they are generated. Record what they
+            should contain, and which context document must change to produce it,
+            in the summary's "Checklist follow-ups" section.
+
+            Reading the issue is the only GitHub interaction allowed: never
+            comment on, label, or close it, and do not create a branch, commit,
+            or pull request — later steps in this workflow handle version
+            control.
+
+      - name: Open the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          summary="${{ runner.temp }}/rollback-summary.md"
+          if [[ ! -s "$summary" ]]; then
+            echo "::error::the skill produced no execution summary"
+            exit 1
+          fi
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "no-changes=true" >>"$GITHUB_OUTPUT"
+            {
+              echo "The rollback plan produced no source changes — its steps are operational, already satisfied, or need a decision."
+              echo
+              cat "$summary"
+            } >"${{ runner.temp }}/no-changes.md"
+            gh issue comment "$ISSUE_NUMBER" --body-file "${{ runner.temp }}/no-changes.md"
+            exit 0
+          fi
+
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "Apply rollback plan for issue #${ISSUE_NUMBER}"
+          git push -u origin "$BRANCH"
+
+          title=$(gh issue view "$ISSUE_NUMBER" --json title --jq .title)
+          url=$(gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH" \
+            --title "Rollback: ${title} (#${ISSUE_NUMBER})" \
+            --body-file "$summary")
+          echo "url=$url" >>"$GITHUB_OUTPUT"
+
+      - name: Link the pull request on the issue
+        if: steps.pr.outputs.no-changes != 'true'
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "Rollback applied in ${{ steps.pr.outputs.url }} — review the *Not code — do these by hand* and *Checklist follow-ups* sections before merging."
+
+      - name: Report failure on the issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "Rollback execution failed. See the [run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}); nothing was pushed."

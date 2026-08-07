@@ -1,0 +1,31 @@
+# EXAMPLE WRAPPER — copy this into YOUR repo at .github/workflows/rollback-plan.yml
+#
+# This file lives under `examples/` so it never runs here. GitHub only executes
+# workflows at the top level of `.github/workflows/`.
+#
+# Posts a rollback plan as a comment whenever an issue is opened.
+
+name: Rollback plan
+
+on:
+  issues:
+    types: [opened]
+
+# Must be at least as broad as the reusable workflow's own `permissions:` —
+# GitHub intersects the two, it does not take the union.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  plan:
+    # Pin to a tag or a full commit SHA. Never @main.
+    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
+    with:
+      issue_number: ${{ github.event.issue.number }}
+      # context_path: context        # default
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Optional: post as a GitHub App instead of github-actions[bot].
+      # github_app_id:  ${{ secrets.APP_ID }}
+      # github_app_pem: ${{ secrets.APP_PRIVATE_KEY }}

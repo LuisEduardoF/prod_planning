@@ -1,0 +1,170 @@
+# ---------------------------------------------------------------------------
+# Context Scaffold — reusable workflow (`workflow_call`)
+#
+# Creates or repairs the `context/` documentation tree (business/, product/,
+# data/input/, data/output/ + README.md) in the CALLING repository, then opens a
+# pull request with it.
+#
+# Idempotency: REPAIR, never destructive. Only missing directories and .gitkeep
+# files are created, and an existing `context/README.md` is never overwritten.
+# If nothing needed to change, no branch and no pull request are created and the
+# run succeeds quietly.
+#
+# Inputs:
+#   target_path     (string, optional, default ".")
+#                   Directory to scaffold `context/` under, relative to the
+#                   caller's repo root.
+#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#                   Repo to load `skills/` from. Override only on a fork.
+#   workflows_ref   (string, optional)
+#                   Ref of workflows_repo to load `skills/` from. Defaults to
+#                   the exact commit of THIS file, so the skills always match
+#                   the tag the caller pinned.
+#
+# Secrets:
+#   anthropic_api_key (optional) — Anthropic API key for the Claude Code action.
+#   github_app_id     (optional) — GitHub App id. If set with github_app_pem, a
+#                                  short-lived App token is minted and used
+#                                  instead of GITHUB_TOKEN, so the pull request
+#                                  this opens can trigger the caller's other
+#                                  workflows.
+#   github_app_pem    (optional) — GitHub App private key (PEM).
+#
+# Example caller (.github/workflows/context-scaffold.yml in YOUR repo):
+#
+#   name: Scaffold context
+#   on:
+#     workflow_dispatch:
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     scaffold:
+#       uses: artefactory-br/prod_planning/.github/workflows/context-scaffold.yml@v1
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+# ---------------------------------------------------------------------------
+
+name: Context Scaffold
+
+on:
+  workflow_call:
+    inputs:
+      target_path:
+        description: "Directory to scaffold context/ under (relative to repo root)"
+        type: string
+        required: false
+        default: "."
+      workflows_repo:
+        description: "Repo hosting the skills/ folder"
+        type: string
+        required: false
+        default: artefactory-br/prod_planning
+      workflows_ref:
+        description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
+        type: string
+        required: false
+    secrets:
+      anthropic_api_key:
+        required: false
+      github_app_id:
+        required: false
+      github_app_pem:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not an allowed context in a step-level `if:`, but it is in a
+      # job-level `env:`. Hoist the check here so the step below can test it.
+      HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: ${{ env.HAS_APP_CREDS == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_pem }}
+
+      - name: Resolve the token to use
+        id: auth
+        env:
+          # App token when the caller supplied App credentials, otherwise the
+          # caller's GITHUB_TOKEN. Never echoed — written straight to the
+          # step output, which the runner masks as a secret.
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+      # The CALLING repository. No `repository:` override on purpose — under
+      # workflow_call this resolves to the caller, which is the repo we scaffold.
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.auth.outputs.token }}
+
+      # This hub repo, for `skills/` only. Checked out AFTER the caller so it
+      # isn't wiped, and into a subdirectory so it never becomes the working tree.
+      - name: Checkout the skills library
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.workflows_repo }}
+          ref: ${{ inputs.workflows_ref || github.job_workflow_sha }}
+          path: .prod-planning
+          # Lets an App with read access here serve a PRIVATE hub repo.
+          token: ${{ steps.auth.outputs.token }}
+          # We never push from this checkout, and the agent can read the
+          # workspace — don't leave a usable token in .prod-planning/.git/config.
+          persist-credentials: false
+
+      - name: Keep the skills checkout out of the caller's index
+        run: |
+          # Without this, a `git add -A` in a later step would stage the whole
+          # skills library into the caller's pull request.
+          echo ".prod-planning/" >>"$GITHUB_WORKSPACE/.git/info/exclude"
+
+      - name: Run context-scaffold skill
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ steps.auth.outputs.token }}
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Glob,Bash(mkdir:*),Bash(git:*),Bash(gh:*)"
+          prompt: |
+            Read and follow the instructions in
+            `.prod-planning/skills/context-scaffold/SKILL.md` (and its
+            `assets/README.template.md`) to scaffold or repair the `context/`
+            documentation tree under `${{ inputs.target_path }}`.
+
+            `.prod-planning/` is the skill library only — read from it, never
+            write to it and never commit it. The repository you are scaffolding
+            is the one checked out at the workspace root
+            (`${{ github.repository }}`).
+
+            Follow the skill's steps exactly: inspect before writing, create only
+            missing directories/.gitkeep files, and never overwrite an existing
+            `context/README.md` (offer a merge instead, as the skill describes).
+
+            When finished:
+            1. Configure `git config user.name "claude[bot]"` and
+               `git config user.email "claude[bot]@users.noreply.github.com"`.
+            2. Create a new branch named
+               `context-scaffold/run-${{ github.run_id }}`.
+            3. Commit exactly the files you created or modified.
+            4. Push the branch and open a pull request (`gh pr create`) against
+               `${{ github.event.repository.default_branch }}` titled
+               "Scaffold context/ folder", with a body listing what was created
+               versus what already existed. Do not merge it.
+
+            If `context/` is already fully scaffolded and nothing needed to
+            change, skip branch/PR creation and just report that in the run log.

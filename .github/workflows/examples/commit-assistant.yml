@@ -1,0 +1,29 @@
+# EXAMPLE WRAPPER — copy this into YOUR repo at .github/workflows/commit-assistant.yml
+#
+# Comments on a pull request into the production branch when the diff breaks a
+# checklist item. Advisory only — it never fails the check, so it will not block
+# a merge. If you want it to block, add a required status check on a job of your
+# own that reads this workflow's result.
+#
+# Pull requests from forks get a read-only token and no secrets, so this job
+# cannot comment on them.
+
+name: Checklist review
+
+on:
+  pull_request:
+    branches: [production]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    uses: artefactory-br/prod_planning/.github/workflows/commit-assistant.yml@v1
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      target_branch: production
+      # checklist_path: checklists   # default
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

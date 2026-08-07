@@ -1,0 +1,286 @@
+# ---------------------------------------------------------------------------
+# Commit Assistant — reusable workflow (`workflow_call`)
+#
+# Checks a pull request's diff against the CALLING repository's generated
+# checklists and comments when the change breaks — or puts at risk — a checked
+# item. Advisory only: it comments, it never edits code, never edits the
+# checklists, and never fails the job on findings, so it cannot block a merge.
+#
+# NOTE — this workflow has no predecessor in the original project. It was
+# designed from scratch against the brief "check whether the diff breaks any
+# checklist item and comment if so", and its behavior lives in
+# skills/commit-assistant/SKILL.md. Review that skill before trusting it.
+#
+# TRIGGER CONTRACT — wrap this with `pull_request`. Two caveats:
+#  - Pull requests from FORKS get a read-only token and no secrets, so the job
+#    cannot comment. Use `pull_request_target` only if you understand that it
+#    runs with the base repo's secrets; this workflow does not check out
+#    untrusted PR code for execution, but it does read it.
+#  - The checklists it judges against are the ones in the PR's merge result, not
+#    the base branch — so a pull request that legitimately regenerates the
+#    checklists is measured against its own new ones. A pull request whose diff
+#    touches ONLY `checklist_path` is skipped entirely.
+#
+# Idempotency: posts exactly one comment per pull request, behind the marker
+# `<!-- commit-assistant: pr-<N> -->`, and updates it in place on later pushes.
+# When a later push clears all findings, the existing comment is rewritten to
+# say so rather than left stale. When there is nothing to report and no previous
+# comment exists, nothing is posted.
+#
+# Inputs:
+#   pr_number       (number, REQUIRED)
+#                   Pull request to review.
+#   target_branch   (string, optional)
+#                   If set, the job runs only when the pull request's base
+#                   branch matches — a second guard on top of the wrapper's
+#                   `branches:` filter. Empty means "any base branch".
+#   checklist_path  (string, optional, default "checklists")
+#                   Folder holding checklist-code.md and checklist-data.md.
+#   context_path    (string, optional, default "context")
+#                   Only used to disambiguate a checklist item's wording.
+#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_ref   (string, optional) — defaults to this file's own commit.
+#
+# Secrets:
+#   anthropic_api_key (optional) — Anthropic API key for the Claude Code action.
+#   github_app_id     (optional) — GitHub App id; with github_app_pem, the review
+#                                  comment is posted as the App.
+#   github_app_pem    (optional) — GitHub App private key (PEM).
+#
+# Example caller (.github/workflows/commit-assistant.yml in YOUR repo):
+#
+#   name: Checklist review
+#   on:
+#     pull_request:
+#       branches: [production]
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#   jobs:
+#     review:
+#       uses: artefactory-br/prod_planning/.github/workflows/commit-assistant.yml@v1
+#       with:
+#         pr_number: ${{ github.event.pull_request.number }}
+#         target_branch: production
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+# ---------------------------------------------------------------------------
+
+name: Commit Assistant
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        type: number
+        required: true
+      target_branch:
+        description: "Only run when the PR's base branch matches this (empty = any)"
+        type: string
+        required: false
+        default: ""
+      checklist_path:
+        description: "Folder holding checklist-code.md and checklist-data.md"
+        type: string
+        required: false
+        default: "checklists"
+      context_path:
+        description: "Context folder, used only to disambiguate checklist wording"
+        type: string
+        required: false
+        default: "context"
+      workflows_repo:
+        description: "Repo hosting the skills/ folder"
+        type: string
+        required: false
+        default: artefactory-br/prod_planning
+      workflows_ref:
+        description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
+        type: string
+        required: false
+    secrets:
+      anthropic_api_key:
+        required: false
+      github_app_id:
+        required: false
+      github_app_pem:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not an allowed context in a step-level `if:`, but it is in a
+      # job-level `env:`. Hoist the check here so the step below can test it.
+      HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      TARGET_BRANCH: ${{ inputs.target_branch }}
+      CHECKLIST_PATH: ${{ inputs.checklist_path }}
+      MARKER: "<!-- commit-assistant: pr-${{ inputs.pr_number }} -->"
+
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: ${{ env.HAS_APP_CREDS == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_pem }}
+
+      - name: Resolve the token to use
+        id: auth
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+      # The CALLING repository. No `repository:` override on purpose — under
+      # workflow_call this resolves to the caller, whose PR we are reviewing.
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.auth.outputs.token }}
+
+      # This hub repo, for `skills/` only.
+      - name: Checkout the skills library
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.workflows_repo }}
+          ref: ${{ inputs.workflows_ref || github.job_workflow_sha }}
+          path: .prod-planning
+          # Lets an App with read access here serve a PRIVATE hub repo.
+          token: ${{ steps.auth.outputs.token }}
+          # We never push from this checkout, and the agent can read the
+          # workspace — don't leave a usable token in .prod-planning/.git/config.
+          persist-credentials: false
+
+      - name: Keep the skills checkout out of the caller's index
+        run: |
+          echo ".prod-planning/" >>"$GITHUB_WORKSPACE/.git/info/exclude"
+
+      - name: Decide whether there is anything to review
+        id: gate
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          skip() { echo "skip=true" >>"$GITHUB_OUTPUT"; echo "$1"; exit 0; }
+
+          base=$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)
+          if [[ -n "$TARGET_BRANCH" && "$base" != "$TARGET_BRANCH" ]]; then
+            skip "PR #${PR_NUMBER} targets '${base}', not '${TARGET_BRANCH}' — nothing to review."
+          fi
+
+          if [[ ! -s "$CHECKLIST_PATH/checklist-code.md" && ! -s "$CHECKLIST_PATH/checklist-data.md" ]]; then
+            skip "No checklists under '${CHECKLIST_PATH}' — nothing to check against. Run checklist-generate first."
+          fi
+
+          gh pr diff "$PR_NUMBER" >"${{ runner.temp }}/pr.diff"
+          if [[ ! -s "${{ runner.temp }}/pr.diff" ]]; then
+            skip "PR #${PR_NUMBER} has an empty diff."
+          fi
+
+          # A pull request that only regenerates the checklists has nothing to
+          # measure — it would otherwise be judged against itself.
+          outside=$(gh pr diff "$PR_NUMBER" --name-only | grep -v "^${CHECKLIST_PATH}/" || true)
+          if [[ -z "$outside" ]]; then
+            skip "PR #${PR_NUMBER} only touches '${CHECKLIST_PATH}/' — skipping."
+          fi
+
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+
+      - name: Review the diff against the checklists
+        if: steps.gate.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ steps.auth.outputs.token }}
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,Write,Bash(ls:*),Bash(find:*)"
+          prompt: |
+            Read and follow the instructions in
+            `.prod-planning/skills/commit-assistant/SKILL.md` (and its template
+            in the sibling `assets/` folder) to review a pull request diff
+            against the project's checklists.
+
+            `.prod-planning/` is the skill library only — read from it, never
+            write to it. The repository under review is the one checked out at
+            the workspace root.
+
+            Inputs — all are given, do not ask for them and do not substitute defaults:
+            - Diff:           `${{ runner.temp }}/pr.diff` (pull request #${{ inputs.pr_number }})
+            - Checklist folder: `${{ inputs.checklist_path }}`
+            - Context folder:   `${{ inputs.context_path }}`
+            - Report output:    `${{ runner.temp }}/review.md`
+            - Verdict output:   `${{ runner.temp }}/verdict.txt`
+
+            Read both checklists and the whole diff, classify every match as
+            `⛔ breaks` or `⚠ at risk`, and quote the checklist item verbatim
+            with the file and hunk that triggered it. Report nothing you cannot
+            cite from the diff — a false alarm here is worse than a miss.
+
+            Write the findings to `${{ runner.temp }}/review.md` and exactly one
+            word — `breaks` or `clear` — to `${{ runner.temp }}/verdict.txt`.
+
+            Do not modify any file in the repository, do not edit the
+            checklists, and do not interact with GitHub — the next step posts
+            the comment.
+
+      - name: Post or update the review comment
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          verdict_file="${{ runner.temp }}/verdict.txt"
+          review_file="${{ runner.temp }}/review.md"
+
+          if [[ ! -s "$verdict_file" ]]; then
+            echo "::error::the skill produced no verdict"
+            exit 1
+          fi
+          verdict=$(tr -d '[:space:]' <"$verdict_file")
+
+          # `gh api` writes its error body to stdout, so a failed lookup would
+          # come back looking like a comment id. Require a numeric id.
+          existing=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --paginate --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" 2>/dev/null | tail -1) || existing=""
+          [[ "$existing" =~ ^[0-9]+$ ]] || existing=""
+
+          body="${{ runner.temp }}/comment.md"
+          if [[ "$verdict" == "breaks" ]]; then
+            if [[ ! -s "$review_file" ]]; then
+              echo "::error::verdict is 'breaks' but the skill produced no report"
+              exit 1
+            fi
+            { echo "$MARKER"; cat "$review_file"; } >"$body"
+          elif [[ -n "$existing" ]]; then
+            # Findings from an earlier push are gone — don't leave them standing.
+            {
+              echo "$MARKER"
+              echo "## Checklist review"
+              echo
+              echo "No checklist items are affected by the current diff. Earlier findings on this pull request have been resolved."
+            } >"$body"
+          else
+            echo "No findings and no previous comment — posting nothing."
+            exit 0
+          fi
+
+          if [[ -n "$existing" ]]; then
+            url=$(gh api --method PATCH \
+              "repos/${{ github.repository }}/issues/comments/${existing}" \
+              -F "body=@${body}" --jq .html_url)
+            echo "Updated the checklist review comment: $url"
+          else
+            url=$(gh pr comment "$PR_NUMBER" --body-file "$body")
+            echo "Posted the checklist review: $url"
+          fi
+
+          # Advisory by design: findings never fail the job, so this can never
+          # block a merge.
+          echo "Verdict: ${verdict}"
