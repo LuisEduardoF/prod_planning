@@ -3,13 +3,36 @@
 # This file lives under `examples/` so it never runs here. GitHub only executes
 # workflows at the top level of `.github/workflows/`.
 #
-# Posts a rollback plan as a comment whenever an issue is opened.
+# Posts a rollback plan as a comment whenever an issue is opened, and lets you
+# re-run it by hand against any issue to resize the plan or add notes. The re-run
+# updates the same comment in place rather than stacking a second plan.
 
 name: Rollback plan
 
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue to plan for"
+        type: number
+        required: true
+      plan_length:
+        description: "How many steps the plan carries"
+        type: choice
+        default: medium
+        options: [short, medium, long]
+      detail_level:
+        description: "How much explanation per step"
+        type: choice
+        default: medium
+        options: [brief, medium, deep]
+      notes:
+        description: "Notes for the agent — known-good version, maintenance window, who is already notified"
+        type: string
+        required: false
+        default: ""
 
 # Must be at least as broad as the reusable workflow's own `permissions:` —
 # GitHub intersects the two, it does not take the union.
@@ -22,8 +45,16 @@ jobs:
     # Pin to a tag or a full commit SHA. Never @main.
     uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
     with:
-      issue_number: ${{ github.event.issue.number }}
+      # On the issues path `inputs.*` is empty and the event supplies the number;
+      # on the dispatch path it is the other way round.
+      issue_number: ${{ inputs.issue_number || github.event.issue.number }}
       # context_path: context        # default
+      plan_length: ${{ inputs.plan_length || 'medium' }}
+      detail_level: ${{ inputs.detail_level || 'medium' }}
+      # Standing notes live in context/NOTES.md (the notes_path default), which
+      # is the only channel an issue-triggered run can read. This adds one-off
+      # notes on top when the run was dispatched by hand.
+      notes: ${{ inputs.notes || '' }}
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       # Optional: post as a GitHub App instead of github-actions[bot].

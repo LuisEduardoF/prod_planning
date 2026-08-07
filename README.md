@@ -73,12 +73,36 @@ This posts a rollback plan on every newly opened issue. Wrappers for the other f
 | Workflow | Purpose | Wrap it with | Required inputs | Optional inputs | Secrets |
 |---|---|---|---|---|---|
 | [`context-scaffold.yml`](.github/workflows/context-scaffold.yml) | Creates or repairs the `context/` tree (business/, product/, data/input/, data/output/ + README) and opens a PR | `workflow_dispatch` | — | `target_path` (`.`) | all optional |
-| [`checklist-generate.yml`](.github/workflows/checklist-generate.yml) | Reads `context/` and generates `checklist-code.md` + `checklist-data.md`, opens a PR | `push` on `context/**`, or `workflow_dispatch` | — | `context_path` (`context`), `output_path` (`checklists`) | all optional |
-| [`rollback-plan-generate.yml`](.github/workflows/rollback-plan-generate.yml) | Reads an issue + `context/` + checklists, posts a rollback plan as an issue comment | `issues: [opened]` | `issue_number` | `context_path`, `output_path`, `new_comment` | all optional |
+| [`checklist-generate.yml`](.github/workflows/checklist-generate.yml) | Reads `context/` and generates `checklist-code.md` + `checklist-data.md`, opens a PR | `push` on `context/**`, or `workflow_dispatch` | — | `context_path` (`context`), `output_path` (`checklists`), `checklist_length` (`medium`), `detail_level` (`medium`), `notes` (`""`), `notes_path` (`context/NOTES.md`) | all optional |
+| [`rollback-plan-generate.yml`](.github/workflows/rollback-plan-generate.yml) | Reads an issue + `context/` + checklists, posts a rollback plan as an issue comment | `issues: [opened]` | `issue_number` | `context_path`, `output_path`, `new_comment`, `plan_length` (`medium`), `detail_level` (`medium`), `notes` (`""`), `notes_path` (`context/NOTES.md`) | all optional |
 | [`rollback-plan-execute.yml`](.github/workflows/rollback-plan-execute.yml) | On `/execute-rollback`, applies the agreed plan's code steps and opens a PR | `issue_comment: [created]` | `issue_number` | `context_path` | all optional |
 | [`commit-assistant.yml`](.github/workflows/commit-assistant.yml) | Checks a PR diff against the checklists and comments on items it breaks | `pull_request` on your production branch | `pr_number` | `target_branch`, `checklist_path`, `context_path` | all optional |
 
 Every workflow also takes `workflows_repo` and `workflows_ref` — see **Where the skills come from** below. You will not normally set either.
+
+### 📏 Sizing the output
+
+`checklist-generate` and `rollback-plan-generate` take two independent sizing knobs, both defaulting to `medium`:
+
+| Input | Values | What it changes |
+|---|---|---|
+| `checklist_length` / `plan_length` | `short` \| `medium` \| `long` | **How many items.** `short` keeps `must` requirements only (~15–25 items) or the minimum viable runbook (~5–8 steps); `medium` is the full documented breakdown; `long` adds `could` requirements, per-field items, per-step fallbacks. |
+| `detail_level` | `brief` \| `medium` \| `deep` | **How much prose per item.** `brief` is one line plus its source; `medium` adds a clarifying line where an item carries a caveat or threshold; `deep` adds why it matters, how to verify it, and the exact value quoted from the doc. |
+
+They compose: `short` + `deep` gives a few thoroughly-explained items — the right shape for a runbook someone reads mid-incident. `long` + `brief` gives a wide, scannable index.
+
+Neither knob can switch off a `⚠ gap` item, an `⚙ inferred` tag, or a source citation, and no length drops a rollback plan's Trigger / Rollback steps / Validation sections. The sizes are budgets, not quotas: a thin `context/` is not padded to reach one, and a `must` requirement is never dropped to stay under one. An unrecognised value **fails the run** rather than being coerced to the default, so a typo can't silently resize your output.
+
+### 📝 Operator notes
+
+Both workflows accept free-text notes — the place to say what the documents bury, omit, or get wrong: *"the sample CSV in `data/input` is stale, use appendix B"*, *"last known-good model is v4.2"*, *"add an item for the LGPD review"*. Two channels, and they merge when both are present:
+
+- **`notes`** — an inline string, for one run. Wrap the workflow with `workflow_dispatch` and expose it as a form field.
+- **`notes_path`** — a file in your repo (default `context/NOTES.md`), for standing guidance. This is the channel that works on `push`- and `issues`-triggered runs, where there is no form to type into.
+
+Notes shape the output but never outrank a document. Something a note asks for that no document supports is emitted cited `(source: operator note)` on a checklist, or `⚙ inferred (operator note)` on a rollback plan — so it reads as operator-requested, not document-backed. Where a note **contradicts** a document, the document wins and the conflict is recorded as a `⚠ gap` item (or a Follow-up entry) for a human to settle.
+
+Notes reach the agent as a file, never interpolated into the prompt or a shell command, and the skills treat their contents as data rather than instructions — so a note cannot talk the agent into skipping steps, writing elsewhere, or dropping the citation rules.
 
 ### 🔒 Secrets
 

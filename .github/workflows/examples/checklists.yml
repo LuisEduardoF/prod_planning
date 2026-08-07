@@ -15,6 +15,21 @@ on:
         description: "Also scaffold/repair the context/ folder first"
         type: boolean
         default: false
+      checklist_length:
+        description: "How many items per checklist"
+        type: choice
+        default: medium
+        options: [short, medium, long]
+      detail_level:
+        description: "How much explanation per item"
+        type: choice
+        default: medium
+        options: [brief, medium, deep]
+      notes:
+        description: "Notes for the agent — points the docs bury or omit, examples to include"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -35,5 +50,13 @@ jobs:
     with:
       context_path: context
       output_path: checklists
+      # `inputs.*` is empty on the push path — fall back to the medium default
+      # so a push-triggered regenerate matches a hand-dispatched one.
+      checklist_length: ${{ inputs.checklist_length || 'medium' }}
+      detail_level: ${{ inputs.detail_level || 'medium' }}
+      # Standing notes live in context/NOTES.md (the notes_path default), which
+      # is the only channel a push-triggered run can read. This adds one-off
+      # notes on top when the run was dispatched by hand.
+      notes: ${{ inputs.notes || '' }}
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
