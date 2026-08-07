@@ -83,6 +83,9 @@ jobs:
       # `secrets` is not an allowed context in a step-level `if:`, but it is in a
       # job-level `env:`. Hoist the check here so the step below can test it.
       HAS_APP_CREDS: ${{ secrets.github_app_id != '' && secrets.github_app_pem != '' }}
+      TARGET_PATH: ${{ inputs.target_path }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      BRANCH: context-scaffold/run-${{ github.run_id }}
 
     steps:
       - name: Mint a GitHub App token
@@ -109,6 +112,9 @@ jobs:
       - name: Checkout the calling repository
         uses: actions/checkout@v4
         with:
+          # Full history so the `git diff` in the pull request body resolves a
+          # merge base against origin/<default branch>.
+          fetch-depth: 0
           token: ${{ steps.auth.outputs.token }}
 
       # This hub repo, for `skills/` only. Checked out AFTER the caller so it
@@ -133,13 +139,13 @@ jobs:
 
       - name: Run context-scaffold skill
         uses: anthropics/claude-code-action@v1
-        env:
-          GH_TOKEN: ${{ steps.auth.outputs.token }}
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ steps.auth.outputs.token }}
+          # No Bash(git:*)/Bash(gh:*) — version control is the workflow's job,
+          # not the agent's, so the agent never needs a writable token.
           claude_args: |
-            --allowedTools "Read,Write,Edit,Glob,Bash(mkdir:*),Bash(git:*),Bash(gh:*)"
+            --allowedTools "Read,Write,Edit,Glob,Bash(mkdir:*),Bash(ls:*),Bash(find:*)"
           prompt: |
             Read and follow the instructions in
             `.prod-planning/skills/context-scaffold/SKILL.md` (and its
@@ -155,16 +161,47 @@ jobs:
             missing directories/.gitkeep files, and never overwrite an existing
             `context/README.md` (offer a merge instead, as the skill describes).
 
-            When finished:
-            1. Configure `git config user.name "claude[bot]"` and
-               `git config user.email "claude[bot]@users.noreply.github.com"`.
-            2. Create a new branch named
-               `context-scaffold/run-${{ github.run_id }}`.
-            3. Commit exactly the files you created or modified.
-            4. Push the branch and open a pull request (`gh pr create`) against
-               `${{ github.event.repository.default_branch }}` titled
-               "Scaffold context/ folder", with a body listing what was created
-               versus what already existed. Do not merge it.
+            Do not create a branch, commit, or pull request — later steps in
+            this workflow handle version control. Finish by reporting which
+            items you created versus which already existed.
 
-            If `context/` is already fully scaffolded and nothing needed to
-            change, skip branch/PR creation and just report that in the run log.
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          # Scaffolding is repair-only: an already-complete context/ leaves the
+          # tree clean, and that is a quiet success, not a failure.
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "context/ is already fully scaffolded — nothing to commit."
+            exit 0
+          fi
+
+          echo "Changes detected:"
+          git status --short
+
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "Scaffold context/ folder"
+          git push -u origin "$BRANCH"
+
+          {
+            echo "Scaffolds the \`context/\` documentation tree under \`${TARGET_PATH}\` by running"
+            echo "the \`context-scaffold\` skill."
+            echo
+            echo "Files in this branch:"
+            echo
+            echo '```'
+            git diff --name-status "origin/${BASE_BRANCH}...${BRANCH}"
+            echo '```'
+            echo
+            echo "Anything not listed above was already present and was left untouched."
+          } >"${{ runner.temp }}/pr-body.md"
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH" \
+            --title "Scaffold context/ folder" \
+            --body-file "${{ runner.temp }}/pr-body.md"
