@@ -9,7 +9,7 @@ Five **reusable GitHub Actions workflows** that turn a repository's context docu
 ```yaml
 jobs:
   plan:
-    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
 ```
 
 ## Features
@@ -30,9 +30,9 @@ jobs:
 **Use `@v1` or a full commit SHA. Never `@main`.**
 
 ```yaml
-uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1        # ok
-uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@a1b2c3d   # better
-uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@main      # no
+uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@v1        # ok
+uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@a1b2c3d   # better
+uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@main      # no
 ```
 
 These workflows run an LLM agent with write access to your repository. `@main` means a change here silently changes what that agent does in your repo, on your next issue, with no review on your side. A SHA is immutable; a tag is at least deliberate.
@@ -54,7 +54,7 @@ permissions:
 
 jobs:
   plan:
-    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
     with:
       issue_number: ${{ github.event.issue.number }}
     secrets:
@@ -85,13 +85,13 @@ issue opened  →  rollback-plan-generate posts the plan  →  a writer comments
 
 ## 📚 The workflows
 
-| Workflow | Purpose | Wrap it with | Required inputs | Optional inputs | Secrets |
-|---|---|---|---|---|---|
-| [`context-scaffold.yml`](.github/workflows/context-scaffold.yml) | Creates or repairs the `context/` tree (business/, product/, data/input/, data/output/ + README) and opens a PR | `workflow_dispatch` | — | `target_path` (`.`) | all optional |
-| [`checklist-generate.yml`](.github/workflows/checklist-generate.yml) | Reads `context/` and generates `checklist-code.md` + `checklist-data.md`, opens a PR | `push` on `context/**`, or `workflow_dispatch` | — | `context_path` (`context`), `output_path` (`checklists`) | all optional |
-| [`rollback-plan-generate.yml`](.github/workflows/rollback-plan-generate.yml) | Reads an issue + `context/` + checklists, posts a rollback plan as an issue comment | `issues: [opened]` | `issue_number` | `context_path`, `output_path`, `new_comment` | all optional |
-| [`rollback-plan-execute.yml`](.github/workflows/rollback-plan-execute.yml) | On a comment starting with `/execute`, applies the agreed plan's code steps and opens a PR | `issue_comment: [created]` | `issue_number` | `context_path` | all optional |
-| [`commit-assistant.yml`](.github/workflows/commit-assistant.yml) | Checks a PR diff against the checklists and comments on items it breaks | `pull_request` on your production branch | `pr_number` | `target_branch`, `checklist_path`, `context_path` | all optional |
+| Workflow | Purpose | Wrap it with | Required inputs | Optional inputs | Permissions | Secrets |
+|---|---|---|---|---|---|---|
+| [`context-scaffold.yml`](.github/workflows/context-scaffold.yml) | Creates or repairs the `context/` tree (business/, product/, data/input/, data/output/ + README) and opens a PR | `workflow_dispatch` | — | `target_path` (`.`) | `contents: write`, `pull-requests: write` | all optional |
+| [`checklist-generate.yml`](.github/workflows/checklist-generate.yml) | Reads `context/` and generates `checklist-code.md` + `checklist-data.md`, opens a PR | `push` on `context/**`, or `workflow_dispatch` | — | `context_path` (`context`), `output_path` (`checklists`) | `contents: write`, `pull-requests: write` | all optional |
+| [`rollback-plan-generate.yml`](.github/workflows/rollback-plan-generate.yml) | Reads an issue + `context/` + checklists, posts a rollback plan as an issue comment | `issues: [opened]` | `issue_number` | `context_path`, `output_path`, `new_comment` | `contents: read`, `issues: write` | all optional |
+| [`rollback-plan-execute.yml`](.github/workflows/rollback-plan-execute.yml) | On a comment starting with `/execute`, applies the agreed plan's code steps and opens a PR | `issue_comment: [created]` | `issue_number` | `context_path` | `contents: write`, `pull-requests: write`, `issues: write` | all optional |
+| [`commit-assistant.yml`](.github/workflows/commit-assistant.yml) | Checks a PR diff against the checklists and comments on items it breaks | `pull_request` on your production branch | `pr_number` | `target_branch`, `checklist_path`, `context_path` | `contents: read`, `pull-requests: write` | all optional |
 
 Every workflow also takes `workflows_repo` and `workflows_ref` — see **Where the skills come from** below. You will not normally set either.
 
@@ -109,7 +109,7 @@ When both App values are set, each workflow mints a short-lived App token and us
 
 ## ⚠️ Two things that will bite you
 
-**1. Permissions are intersected, not inherited.** A reusable workflow declares its own `permissions:`, but GitHub grants the *intersection* of that and the calling job's token. If your wrapper omits `permissions:` — or declares less than the table above — the job runs with too little access and fails on the first `gh` call. Declare at least as much in your wrapper as the workflow needs.
+**1. Permissions are intersected, not inherited.** A reusable workflow declares its own `permissions:`, but GitHub grants the *intersection* of that and the calling job's token. If your wrapper omits `permissions:` — or declares less than the **Permissions** column in the workflows table above — the job runs with too little access and fails on the first `gh` call. Declare at least as much in your wrapper as the workflow needs.
 
 **2. Trigger contracts.** Data the workflows operate on comes from `inputs.*`, so you can wrap most of them with any event, including `workflow_dispatch`. The exception is `rollback-plan-execute`, whose three safety gates (comment is on an issue not a PR, comment *starts with* `/execute`, author has write access) read `github.event.*` directly so a wrapper cannot weaken them. Wrapped with anything other than `issue_comment`, those gates evaluate empty and the job is **skipped** rather than run unguarded. That is deliberate: it pushes code, so it fails closed.
 

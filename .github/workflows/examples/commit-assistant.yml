@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   review:
-    uses: artefactory-br/prod_planning/.github/workflows/commit-assistant.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/commit-assistant.yml@v1
     with:
       pr_number: ${{ github.event.pull_request.number }}
       target_branch: production

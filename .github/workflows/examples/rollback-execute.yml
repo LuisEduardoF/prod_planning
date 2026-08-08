@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   execute:
-    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
     with:
       issue_number: ${{ github.event.issue.number }}
     secrets:

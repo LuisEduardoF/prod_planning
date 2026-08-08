@@ -29,7 +29,7 @@
 #                   Issue carrying the agreed rollback plan.
 #   context_path    (string, optional, default "context")
 #                   Context folder in the caller's repo.
-#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_repo  (string, optional, default "LuisEduardoF/prod_planning")
 #   workflows_ref   (string, optional) — defaults to this file's own commit.
 #
 # Secrets:
@@ -51,7 +51,7 @@
 #     issues: write
 #   jobs:
 #     execute:
-#       uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
+#       uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-execute.yml@v1
 #       with:
 #         issue_number: ${{ github.event.issue.number }}
 #       secrets:
@@ -76,7 +76,7 @@ on:
         description: "Repo hosting the skills/ folder"
         type: string
         required: false
-        default: artefactory-br/prod_planning
+        default: LuisEduardoF/prod_planning
       workflows_ref:
         description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
         type: string

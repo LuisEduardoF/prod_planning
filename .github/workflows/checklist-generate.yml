@@ -18,7 +18,7 @@
 #                   Folder holding business/, product/, data/input/, data/output/.
 #   output_path     (string, optional, default "checklists")
 #                   Directory to write the two checklist files into.
-#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_repo  (string, optional, default "LuisEduardoF/prod_planning")
 #   workflows_ref   (string, optional) — defaults to this file's own commit.
 #
 # Secrets:
@@ -41,7 +41,7 @@
 #     pull-requests: write
 #   jobs:
 #     checklists:
-#       uses: artefactory-br/prod_planning/.github/workflows/checklist-generate.yml@v1
+#       uses: LuisEduardoF/prod_planning/.github/workflows/checklist-generate.yml@v1
 #       secrets:
 #         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ on:
         description: "Repo hosting the skills/ folder"
         type: string
         required: false
-        default: artefactory-br/prod_planning
+        default: LuisEduardoF/prod_planning
       workflows_ref:
         description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
         type: string

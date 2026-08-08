@@ -23,7 +23,7 @@ permissions:
 jobs:
   scaffold:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.scaffold }}
-    uses: artefactory-br/prod_planning/.github/workflows/context-scaffold.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/context-scaffold.yml@v1
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -31,7 +31,7 @@ jobs:
     # Runs on the push path, and after scaffolding on the dispatch path.
     needs: [scaffold]
     if: ${{ always() && needs.scaffold.result != 'failure' }}
-    uses: artefactory-br/prod_planning/.github/workflows/checklist-generate.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/checklist-generate.yml@v1
     with:
       context_path: context
       output_path: checklists

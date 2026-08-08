@@ -14,7 +14,7 @@
 #   target_path     (string, optional, default ".")
 #                   Directory to scaffold `context/` under, relative to the
 #                   caller's repo root.
-#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_repo  (string, optional, default "LuisEduardoF/prod_planning")
 #                   Repo to load `skills/` from. Override only on a fork.
 #   workflows_ref   (string, optional)
 #                   Ref of workflows_repo to load `skills/` from. Defaults to
@@ -40,7 +40,7 @@
 #     pull-requests: write
 #   jobs:
 #     scaffold:
-#       uses: artefactory-br/prod_planning/.github/workflows/context-scaffold.yml@v1
+#       uses: LuisEduardoF/prod_planning/.github/workflows/context-scaffold.yml@v1
 #       secrets:
 #         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ on:
         description: "Repo hosting the skills/ folder"
         type: string
         required: false
-        default: artefactory-br/prod_planning
+        default: LuisEduardoF/prod_planning
       workflows_ref:
         description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
         type: string

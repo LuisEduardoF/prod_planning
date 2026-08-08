@@ -48,7 +48,7 @@
 #                   wording, and excluded from the diff when deciding whether
 #                   there is anything to review. Set it to "" or "." to disable
 #                   that exclusion.
-#   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
+#   workflows_repo  (string, optional, default "LuisEduardoF/prod_planning")
 #   workflows_ref   (string, optional) — defaults to this file's own commit.
 #
 # Secrets:
@@ -68,7 +68,7 @@
 #     pull-requests: write
 #   jobs:
 #     review:
-#       uses: artefactory-br/prod_planning/.github/workflows/commit-assistant.yml@v1
+#       uses: LuisEduardoF/prod_planning/.github/workflows/commit-assistant.yml@v1
 #       with:
 #         pr_number: ${{ github.event.pull_request.number }}
 #         target_branch: production
@@ -104,7 +104,7 @@ on:
         description: "Repo hosting the skills/ folder"
         type: string
         required: false
-        default: artefactory-br/prod_planning
+        default: LuisEduardoF/prod_planning
       workflows_ref:
         description: "Ref of workflows_repo to load skills/ from (defaults to this workflow's own commit)"
         type: string

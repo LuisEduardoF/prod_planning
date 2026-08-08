@@ -20,7 +20,7 @@ permissions:
 jobs:
   plan:
     # Pin to a tag or a full commit SHA. Never @main.
-    uses: artefactory-br/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
+    uses: LuisEduardoF/prod_planning/.github/workflows/rollback-plan-generate.yml@v1
     with:
       issue_number: ${{ github.event.issue.number }}
       # context_path: context        # default
