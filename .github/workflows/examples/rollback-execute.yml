@@ -1,7 +1,8 @@
 # EXAMPLE WRAPPER — copy this into YOUR repo at .github/workflows/rollback-execute.yml
 #
 # Applies an agreed rollback plan when someone with write access comments
-# `/execute-rollback` on the issue carrying it, and opens a pull request.
+# `/execute` on the issue carrying it, and opens a pull request. The comment
+# must START with `/execute`; mentioning it mid-sentence does nothing.
 #
 # The reusable workflow re-checks the trigger phrase, that the comment is on an
 # issue rather than a pull request, and the commenter's association — you cannot

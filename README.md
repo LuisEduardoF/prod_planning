@@ -16,9 +16,9 @@ jobs:
 
 - 🎯 **Context scaffolding**: Creates or repairs the `context/` tree (`business/`, `product/`, `data/input/`, `data/output/` + README) and opens a PR with the result.
 - 🤖 **Checklist generation**: Reads `context/` and produces `checklist-code.md` and `checklist-data.md`, regenerated from scratch so the context documents stay the single source of truth.
-- 🔍 **Commit assistant**: Checks a PR diff against the generated checklists and comments on the items it breaks — one comment per PR, updated in place, never fails the job.
+- 🔍 **Commit assistant**: Checks a PR diff against the generated checklists and comments on the items it breaks — one comment per PR, updated in place, never fails the job. PRs that touch only `context/` or only the checklists are skipped: those are the steps *upstream* of the review.
 - ✨ **Rollback planning**: Reads an issue plus `context/` and the checklists, then posts a concrete rollback plan as an issue comment.
-- 💬 **Chat-driven execution**: A `/execute-rollback` comment from a writer applies the agreed plan's code steps and opens a PR.
+- 💬 **Chat-driven execution**: An `/execute` comment from a writer, on the issue carrying the plan, applies the agreed plan's code steps and opens a PR.
 - 🛠️ **Skills, not prompts**: Agent instructions live in [`skills/`](skills) as versioned `SKILL.md` files with Markdown templates, checked out alongside your repo at run time.
 - 📋 **Idempotent output**: Comments are matched on hidden markers and updated in place; byte-identical output means no branch, no PR, clean exit.
 - 📊 **Two checklists per repo**: Code-side and data-side, generated from the same context so reviews and rollbacks reference the same facts.
@@ -68,6 +68,21 @@ This posts a rollback plan on every newly opened issue. Wrappers for the other f
 * Declare at least the `permissions:` the workflow needs in *your* wrapper — GitHub grants the intersection, not the union (see **Two things that will bite you** below).
 * `rollback-plan-execute` only works wrapped with `issue_comment`; any other trigger makes it skip.
 
+## 🧭 The intended pipeline
+
+```
+context-scaffold  →  you fill in context/  →  checklist-generate  →  commit-assistant
+   (opens a PR)         (the human step)         (opens a PR)          (on every PR)
+```
+
+The first three steps *produce* the checklists; `commit-assistant` is the only one that judges a change against them, and it runs on your normal pull requests. So it deliberately skips the pull requests the earlier steps open: a diff touching only `context_path` and/or `checklist_path` is upstream of the review — stale checklists are fixed by re-running `checklist-generate`, not by commenting on the prose that will regenerate them. A PR that changes context *and* code is still reviewed, on the code.
+
+The rollback pair hangs off issues rather than this chain, and reads the same `context/` and checklists:
+
+```
+issue opened  →  rollback-plan-generate posts the plan  →  a writer comments `/execute`  →  rollback-plan-execute opens the PR
+```
+
 ## 📚 The workflows
 
 | Workflow | Purpose | Wrap it with | Required inputs | Optional inputs | Secrets |
@@ -75,7 +90,7 @@ This posts a rollback plan on every newly opened issue. Wrappers for the other f
 | [`context-scaffold.yml`](.github/workflows/context-scaffold.yml) | Creates or repairs the `context/` tree (business/, product/, data/input/, data/output/ + README) and opens a PR | `workflow_dispatch` | — | `target_path` (`.`) | all optional |
 | [`checklist-generate.yml`](.github/workflows/checklist-generate.yml) | Reads `context/` and generates `checklist-code.md` + `checklist-data.md`, opens a PR | `push` on `context/**`, or `workflow_dispatch` | — | `context_path` (`context`), `output_path` (`checklists`) | all optional |
 | [`rollback-plan-generate.yml`](.github/workflows/rollback-plan-generate.yml) | Reads an issue + `context/` + checklists, posts a rollback plan as an issue comment | `issues: [opened]` | `issue_number` | `context_path`, `output_path`, `new_comment` | all optional |
-| [`rollback-plan-execute.yml`](.github/workflows/rollback-plan-execute.yml) | On `/execute-rollback`, applies the agreed plan's code steps and opens a PR | `issue_comment: [created]` | `issue_number` | `context_path` | all optional |
+| [`rollback-plan-execute.yml`](.github/workflows/rollback-plan-execute.yml) | On a comment starting with `/execute`, applies the agreed plan's code steps and opens a PR | `issue_comment: [created]` | `issue_number` | `context_path` | all optional |
 | [`commit-assistant.yml`](.github/workflows/commit-assistant.yml) | Checks a PR diff against the checklists and comments on items it breaks | `pull_request` on your production branch | `pr_number` | `target_branch`, `checklist_path`, `context_path` | all optional |
 
 Every workflow also takes `workflows_repo` and `workflows_ref` — see **Where the skills come from** below. You will not normally set either.
@@ -96,7 +111,7 @@ When both App values are set, each workflow mints a short-lived App token and us
 
 **1. Permissions are intersected, not inherited.** A reusable workflow declares its own `permissions:`, but GitHub grants the *intersection* of that and the calling job's token. If your wrapper omits `permissions:` — or declares less than the table above — the job runs with too little access and fails on the first `gh` call. Declare at least as much in your wrapper as the workflow needs.
 
-**2. Trigger contracts.** Data the workflows operate on comes from `inputs.*`, so you can wrap most of them with any event, including `workflow_dispatch`. The exception is `rollback-plan-execute`, whose three safety gates (comment is on an issue not a PR, contains `/execute-rollback`, author has write access) read `github.event.*` directly so a wrapper cannot weaken them. Wrapped with anything other than `issue_comment`, those gates evaluate empty and the job is **skipped** rather than run unguarded. That is deliberate: it pushes code, so it fails closed.
+**2. Trigger contracts.** Data the workflows operate on comes from `inputs.*`, so you can wrap most of them with any event, including `workflow_dispatch`. The exception is `rollback-plan-execute`, whose three safety gates (comment is on an issue not a PR, comment *starts with* `/execute`, author has write access) read `github.event.*` directly so a wrapper cannot weaken them. Wrapped with anything other than `issue_comment`, those gates evaluate empty and the job is **skipped** rather than run unguarded. That is deliberate: it pushes code, so it fails closed.
 
 ## 🔄 Behavior on re-runs
 
@@ -106,7 +121,7 @@ When both App values are set, each workflow mints a short-lived App token and us
 | `checklist-generate` | **Regenerates from scratch.** Hand-edits to a checklist are discarded by design — the context documents are the source of truth. Byte-identical output → no branch, no PR, clean exit. A missing `context_path` fails loudly. |
 | `rollback-plan-generate` | **Updates its own comment in place**, matched on `<!-- rollback-plan-generate: issue-<N> -->`. Pass `new_comment: true` to stack a new one instead. |
 | `rollback-plan-execute` | Refuses to run unless a plan comment (or `checklists/rollback-plan-issue-<N>.md`) already exists. No source changes → comments the summary, opens no PR. |
-| `commit-assistant` | One comment per PR, updated in place on later pushes. Findings cleared → the comment is rewritten to say so. Never fails the job, so it cannot block a merge. |
+| `commit-assistant` | One comment per PR, updated in place on later pushes. Findings cleared → the comment is rewritten to say so. Never fails the job, so it cannot block a merge. A PR touching only `context_path` and/or `checklist_path` is skipped without comment. |
 
 ## 🛠️ Where the skills come from
 
@@ -123,7 +138,7 @@ The skills checkout defaults to `github.job_workflow_sha` — the exact commit o
 * [`skills/context-scaffold/SKILL.md`](skills/context-scaffold/SKILL.md) — how the `context/` tree is created and repaired, plus its [README template](skills/context-scaffold/assets/README.template.md).
 * [`skills/checklist-generate/SKILL.md`](skills/checklist-generate/SKILL.md) — checklist rules, with the [code](skills/checklist-generate/assets/checklist-code.template.md) and [data](skills/checklist-generate/assets/checklist-data.template.md) templates.
 * [`skills/rollback-plan-generate/SKILL.md`](skills/rollback-plan-generate/SKILL.md) — how an issue becomes a plan, and the [plan template](skills/rollback-plan-generate/assets/rollback-plan.template.md).
-* [`skills/rollback-plan-execute/SKILL.md`](skills/rollback-plan-execute/SKILL.md) — what `/execute-rollback` is allowed to touch, and the [summary template](skills/rollback-plan-execute/assets/execution-summary.template.md).
+* [`skills/rollback-plan-execute/SKILL.md`](skills/rollback-plan-execute/SKILL.md) — what `/execute` is allowed to touch, and the [summary template](skills/rollback-plan-execute/assets/execution-summary.template.md).
 * [`skills/commit-assistant/SKILL.md`](skills/commit-assistant/SKILL.md) — diff-vs-checklist review rules and the [comment template](skills/commit-assistant/assets/commit-assistant-comment.template.md).
 * [`scripts/`](scripts) — the same four skills as local CLI scripts, for running them outside Actions.
 * [`.github/actionlint.yaml`](.github/actionlint.yaml) — lint config for the workflow files.

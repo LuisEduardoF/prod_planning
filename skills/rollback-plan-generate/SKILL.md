@@ -37,6 +37,11 @@ Turns a single GitHub issue into an actionable rollback plan: what broke, what i
    - **Validation** — how to confirm the rollback worked, preferring existing acceptance criteria where they apply.
    - **Communication** — who to notify, drawn from roles/stakeholders named in the context docs.
    - **Follow-up** — root-cause action item(s), linked back to the GitHub issue number/URL.
+   - **The closing `/execute` line** — keep the template's footer. It is how a
+     reader learns the plan can be applied by commenting `/execute` on the issue
+     (`rollback-plan-execute`). Keep it where the template puts it, at the end:
+     that workflow triggers on a comment *starting with* `/execute`, so the plan
+     must never open with the command it is describing.
 
 8. **Report** the plan's file path plus a count of traced-vs-inferred steps, so the user knows how much of the plan is grounded versus assumed.
 

@@ -26,7 +26,8 @@ business. Regenerate the checklists (`checklist-generate`) when they are stale.
    `breaks` if there is at least one finding, `clear` otherwise. The calling
    workflow reads this to decide whether to comment.
 5. **Context folder path** — optional. Only for resolving what a checklist item
-   means when its wording is ambiguous. Never a source of new items.
+   means when its wording is ambiguous. Never a source of new items, and never
+   itself under review — see the note on context edits below.
 
 ## Steps
 
@@ -67,6 +68,13 @@ business. Regenerate the checklists (`checklist-generate`) when they are stale.
   `checklist-generate`, not by editing the checklist or by this skill.
 - **Never edit the code under review.** This skill reads a diff and writes a
   report. Applying a fix is a separate, human decision.
+- **Changes to the context folder are not findings.** This skill is the last
+  step of a pipeline — `context-scaffold` → the human fills in `context/` →
+  `checklist-generate` → this. Editing a context document does not break a
+  checklist item; it makes the checklists stale, and the answer is to re-run
+  `checklist-generate`. Ignore context-only hunks in a mixed diff and review the
+  rest. (The calling workflow skips a pull request that touches nothing else,
+  so a diff that is entirely context edits should not reach this skill at all.)
 - **Prefer silence to noise.** This runs on every pull request to the production
   branch. A false `⛔` trains people to ignore the comment. When the diff does
   not settle it, that is `⚠ at risk`, and when nothing is affected the correct

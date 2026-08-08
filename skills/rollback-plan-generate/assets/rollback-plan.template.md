@@ -31,3 +31,7 @@ Generated from GitHub issue <issue URL> and the project's `context/` folder (and
 
 - Traced to context/checklists: <count>
 - ⚙ Inferred (no documented procedure found): <count>
+
+---
+
+Agreed? Comment **`/execute`** on this issue to apply the code steps above and open a pull request. The command has to be the first thing in the comment, and you need write access to the repository. Operational steps stay with a human either way.

@@ -2,9 +2,18 @@
 # Rollback Plan Execute — reusable workflow (`workflow_call`)
 #
 # Second half of the rollback flow: once a rollback plan has been posted to an
-# issue and someone agrees to it, commenting `/execute-rollback` on that issue
-# applies the plan's code steps to the CALLING repository and opens a pull
-# request answering the issue.
+# issue and someone agrees to it, commenting `/execute` on that issue applies
+# the plan's code steps to the CALLING repository and opens a pull request
+# answering the issue.
+#
+#   issue opened  →  rollback-plan-generate posts the plan  →  a writer comments
+#   `/execute`  →  THIS applies the plan's code steps and opens the PR
+#
+# The command must be the FIRST thing in the comment (`startsWith`, not
+# `contains`). `/execute` is short enough that a substring match would fire on
+# any comment that merely mentions it — including this workflow's own replies,
+# which under GitHub App credentials do re-trigger workflows. The older
+# `/execute-rollback` still works, since it starts with `/execute`.
 #
 # TRIGGER CONTRACT — read this before writing a wrapper.
 # The three safety gates below deliberately read `github.event.*` directly
@@ -89,14 +98,15 @@ jobs:
   execute:
     # Three gates, all required:
     #  - a real issue, not a pull request (issue_comment fires for both)
-    #  - the explicit trigger phrase
+    #  - a comment that STARTS with the trigger phrase — see the note on
+    #    startsWith vs contains at the top of this file
     #  - a commenter who can already write to this repo. Without this last
     #    check any passer-by could make the agent push code.
     # Read from github.event.* rather than inputs on purpose — see the TRIGGER
     # CONTRACT note at the top of this file.
     if: >
       !github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/execute-rollback') &&
+      startsWith(github.event.comment.body, '/execute') &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     env:
@@ -170,8 +180,11 @@ jobs:
             --paginate --jq ".[] | select(.body | contains(\"$marker\")) | .id" 2>/dev/null | tail -1) || found=""
           [[ "$found" =~ ^[0-9]+$ ]] || found=""
           if [[ -z "$found" && ! -f "checklists/rollback-plan-issue-${ISSUE_NUMBER}.md" ]]; then
+            # This reply names the trigger phrase, so it must not START with it
+            # — the job's `if:` uses startsWith precisely so replies like this
+            # one cannot re-trigger the workflow.
             gh issue comment "$ISSUE_NUMBER" --body \
-              "No rollback plan found on this issue. Generate one first, then comment \`/execute-rollback\` again."
+              "No rollback plan found on this issue. Generate one first, then comment \`/execute\` again."
             echo "::error::no rollback plan for issue #${ISSUE_NUMBER}"
             exit 1
           fi

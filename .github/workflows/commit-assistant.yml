@@ -19,7 +19,14 @@
 #  - The checklists it judges against are the ones in the PR's merge result, not
 #    the base branch — so a pull request that legitimately regenerates the
 #    checklists is measured against its own new ones. A pull request whose diff
-#    touches ONLY `checklist_path` is skipped entirely.
+#    touches ONLY `checklist_path` and/or `context_path` is skipped entirely.
+#
+# WHERE THIS SITS IN THE PIPELINE
+#   context-scaffold  →  you fill in context/  →  checklist-generate  →  THIS
+# The first three steps produce and refine the checklists; this one is the only
+# step that judges a change against them. That is why the two kinds of pull
+# request the earlier steps open — context edits and regenerated checklists —
+# are skipped here rather than reviewed.
 #
 # Idempotency: posts exactly one comment per pull request, behind the marker
 # `<!-- commit-assistant: pr-<N> -->`, and updates it in place on later pushes.
@@ -37,7 +44,10 @@
 #   checklist_path  (string, optional, default "checklists")
 #                   Folder holding checklist-code.md and checklist-data.md.
 #   context_path    (string, optional, default "context")
-#                   Only used to disambiguate a checklist item's wording.
+#                   The context tree. Used to disambiguate a checklist item's
+#                   wording, and excluded from the diff when deciding whether
+#                   there is anything to review. Set it to "" or "." to disable
+#                   that exclusion.
 #   workflows_repo  (string, optional, default "artefactory-br/prod_planning")
 #   workflows_ref   (string, optional) — defaults to this file's own commit.
 #
@@ -86,7 +96,7 @@ on:
         required: false
         default: "checklists"
       context_path:
-        description: "Context folder, used only to disambiguate checklist wording"
+        description: "Context folder — disambiguates checklist wording, and a PR touching only this (and/or the checklists) is skipped"
         type: string
         required: false
         default: "context"
@@ -121,6 +131,7 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       TARGET_BRANCH: ${{ inputs.target_branch }}
       CHECKLIST_PATH: ${{ inputs.checklist_path }}
+      CONTEXT_PATH: ${{ inputs.context_path }}
       MARKER: "<!-- commit-assistant: pr-${{ inputs.pr_number }} -->"
 
     steps:
@@ -185,11 +196,22 @@ jobs:
             skip "PR #${PR_NUMBER} has an empty diff."
           fi
 
-          # A pull request that only regenerates the checklists has nothing to
-          # measure — it would otherwise be judged against itself.
-          outside=$(gh pr diff "$PR_NUMBER" --name-only | grep -v "^${CHECKLIST_PATH}/" || true)
+          # Two kinds of pull request are upstream of this review, not subject to
+          # it. One that only regenerates the checklists would be judged against
+          # itself. One that only edits the context documents is a step *before*
+          # the checklists exist in their new form — the right response there is
+          # to re-run checklist-generate, not to grade prose against checklists
+          # it is about to replace. Anything mixed (context plus code) is still
+          # reviewed, on the code.
+          ignore="^${CHECKLIST_PATH%/}/"
+          case "$CONTEXT_PATH" in
+            '' | . | ./) ;;  # a context path at the repo root would swallow everything
+            *) ignore="${ignore}|^${CONTEXT_PATH%/}/" ;;
+          esac
+
+          outside=$(gh pr diff "$PR_NUMBER" --name-only | grep -Ev "$ignore" || true)
           if [[ -z "$outside" ]]; then
-            skip "PR #${PR_NUMBER} only touches '${CHECKLIST_PATH}/' — skipping."
+            skip "PR #${PR_NUMBER} touches only the checklists and/or the context documents — skipping."
           fi
 
           echo "skip=false" >>"$GITHUB_OUTPUT"
